@@ -1,6 +1,4 @@
 import Discord, { TextChannel } from "discord.js";
-import TwitterAPI from "twitter-api-v2";
-import queue from "queue";
 import { Worker } from "./types";
 import { Connection, ParsedConfirmedTransaction } from "@solana/web3.js";
 import { fetchWeb3Transactions } from "lib/solana/connection";
@@ -8,12 +6,6 @@ import { parseNFTSale } from "lib/marketplaces";
 import { fetchNFTData } from "lib/solana/NFTData";
 import notifyDiscordSale from "lib/discord/notifyDiscordSale";
 import { fetchDiscordChannel } from "../lib/discord";
-import notifyTwitter from "lib/twitter/notifyTwitter";
-
-const twitterNotifQueue = queue({
-  concurrency: 1,
-  autostart: true
-});
 
 export interface Project {
   mintAddress: string;
@@ -31,7 +23,6 @@ function getSignatureFromTx(
 
 export default function newWorker(
   discordClient: Discord.Client,
-  twitterClient: TwitterAPI | null,
   web3Conn: Connection,
   project: Project
 ): Worker {
@@ -45,10 +36,18 @@ export default function newWorker(
 
   return {
     async execute() {
-      const channel = await getDiscordChannel(discordClient, project.discordChannelId);
-      if (!twitterClient && !channel) {
+      if (!discordClient.isReady()) {
         return;
       }
+
+      const channel = await fetchDiscordChannel(
+        discordClient,
+        project.discordChannelId
+      );
+      if (!channel) {
+        return;
+      }
+
       await fetchWeb3Transactions(web3Conn, project.mintAddress, {
         limit: 50,
         until: getSignatureFromTx(latestParsedTx),
@@ -68,33 +67,12 @@ export default function newWorker(
           if (nftSale.buyer === project.mintAddress) {
             return;
           }
-          if (channel) {
-            await notifyDiscordSale(discordClient, channel, nftSale)
-              .catch(err => catchError(err, "Discord"));
-          }
-          if (twitterClient) {
-            const cb = () => notifyTwitter(twitterClient, nftSale)
-            .catch(err => catchError(err, "Twitter"));
-            twitterNotifQueue.push(cb);
-          }
+
+          await notifyDiscordSale(discordClient, channel, nftSale);
 
           notifyAfter = nftSale.soldAt;
         },
       });
     },
   };
-}
-
-function catchError(err: Error, platform: string) {
-  console.error(`Error occurred when notifying ${platform}`, err);
-}
-
-async function getDiscordChannel(discordClient: Discord.Client, discordChannelId: string) {
-  if (!discordClient.isReady()) {
-    return null;
-  }
-  return fetchDiscordChannel(
-    discordClient,
-    discordChannelId
-  );
 }
